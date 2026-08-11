@@ -6,6 +6,9 @@ anything else long — without doing the fiddly bits yourself.
 Give it a YouTube link or an audio file. You get numbered tracks, an icon for
 every track, and card art, ready to upload.
 
+![A finished card in the Yoto app: card art made from the track icons, and a
+tracklist with a matching icon on every track](docs/example.png)
+
 ## Install (once)
 
 ```bash

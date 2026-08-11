@@ -1,0 +1,178 @@
+#!/usr/bin/env python3
+"""Search yotoicons.com for 16x16 track icons, and sanity-check them.
+
+Two rules decide whether an icon works on the player, and neither is obvious
+until you have shipped a bad one:
+
+  1. Black does not display. A black *background* is therefore harmless -- it
+     reads as transparent. A black *subject* disappears entirely.
+  2. A fully opaque icon prints as a filled square. Icons want transparency
+     around the subject.
+
+Both are checked here before you commit to one.
+
+    yoto-icons search hedgehog                # ranked results, no download
+    yoto-icons get 1234 -o "04 Nathaniel Gnat.png"
+    yoto-icons check ICONS/                   # audit a folder before uploading
+
+Name every icon file identically to its audio file -- "04 Nathaniel Gnat.png"
+next to "04 Nathaniel Gnat.m4a". Upload is a manual per-track click, and matching
+names remove all guesswork at 11pm.
+
+Tag quality is mixed: tags are free text, so "mouse" returns mostly Mickey,
+"hedgehog" is largely Sonic, and sorting by popularity surfaces franchise art
+rather than the best match. --exclude filters the worst of it, but look at the
+results yourself.
+"""
+
+import argparse
+import io
+import os
+import re
+import sys
+import urllib.parse
+import urllib.request
+
+try:
+    from PIL import Image
+except ImportError:
+    sys.exit("needs pillow:  pip3 install pillow")
+
+BASE = "https://yotoicons.com"
+UA = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7)"
+DEFAULT_EXCLUDE = ["sonic", "mickey", "minnie", "disney", "pokemon", "mario",
+                   "peppa", "paw patrol", "bluey", "spiderman", "batman"]
+
+# populate_icon_modal('id', 'category', 'tag1', 'tag2', 'artist', 'downloads')
+ROW = re.compile(
+    r"populate_icon_modal\('(\d+)',\s*'([^']*)',\s*'([^']*)',\s*'([^']*)',\s*'([^']*)',\s*'([^']*)'")
+
+
+def fetch(url, binary=False):
+    req = urllib.request.Request(url, headers={"User-Agent": UA})
+    with urllib.request.urlopen(req, timeout=30) as r:
+        return r.read() if binary else r.read().decode("utf-8", "replace")
+
+
+def search(tag, exclude, limit):
+    html = fetch(f"{BASE}/icons?category=&tag={urllib.parse.quote(tag)}")
+    rows = []
+    seen = set()
+    for m in ROW.finditer(html):
+        icon_id, cat, t1, t2, artist, downloads = m.groups()
+        if icon_id in seen:
+            continue
+        seen.add(icon_id)
+        blob = f"{cat} {t1} {t2}".lower()
+        if any(x in blob for x in exclude):
+            continue
+        try:
+            dl = int(downloads)
+        except ValueError:
+            dl = 0
+        rows.append({"id": icon_id, "tags": f"{t1} {t2}".strip(),
+                     "category": cat, "artist": artist, "downloads": dl})
+    rows.sort(key=lambda r: -r["downloads"])
+    return rows[:limit]
+
+
+def normalise(img):
+    """Some icons are stored upscaled -- 256, 320, 336 px. They are always exact
+    multiples of 16, so NEAREST back to 16x16 is lossless, not a resample."""
+    img = img.convert("RGBA")
+    if img.size != (16, 16):
+        if img.width % 16 or img.height % 16:
+            print(f"    warning: {img.size} is not a multiple of 16 -- "
+                  f"downscaling will smudge it", file=sys.stderr)
+        img = img.resize((16, 16), Image.NEAREST)
+    return img
+
+
+def audit(img):
+    px = list(img.convert("RGBA").getdata())
+    opaque = sum(1 for p in px if p[3] > 200)
+    black = sum(1 for p in px if p[3] > 200 and max(p[:3]) < 12)
+    notes = []
+    if opaque == 256:
+        notes.append("fully opaque -- will print as a filled square")
+    if black > 8:
+        notes.append(f"{black} near-black opaque px -- those will vanish on the player")
+    return notes
+
+
+def cmd_search(a):
+    rows = search(a.tag, [e.lower() for e in (a.exclude or DEFAULT_EXCLUDE)], a.limit)
+    if not rows:
+        print(f"nothing for '{a.tag}' (after filtering). Try a plainer noun.")
+        return
+    print(f"{len(rows)} results for '{a.tag}', most-downloaded first:\n")
+    print(f"  {'id':>6}  {'dls':>6}  {'tags':<28} artist")
+    for r in rows:
+        print(f"  {r['id']:>6}  {r['downloads']:>6}  {r['tags'][:28]:<28} {r['artist']}")
+    print(f"\n  yoto-icons get <id> -o \"01 Track Name.png\"")
+    print("  Popularity ranks franchise art highly -- pick on fit, not position.")
+
+
+def cmd_get(a):
+    data = fetch(f"{BASE}/static/uploads/{a.icon_id}.png", binary=True)
+    img = normalise(Image.open(io.BytesIO(data)))
+    out = a.output or f"{a.icon_id}.png"
+    img.save(out)
+    notes = audit(img)
+    print(f"saved {out} (16x16)")
+    for n in notes:
+        print(f"  warning: {n}")
+    if a.preview:
+        p = f"{os.path.splitext(out)[0]}_preview.png"
+        img.resize((256, 256), Image.NEAREST).save(p)
+        print(f"  preview at 8x: {p}  (16x16 is unreadable on a monitor "
+              f"but perfectly clear on the player)")
+
+
+def cmd_check(a):
+    files = sorted(f for f in os.listdir(a.folder) if f.lower().endswith((".png", ".gif")))
+    if not files:
+        sys.exit(f"no PNG or GIF in {a.folder}")
+    bad = 0
+    print(f"Checking {len(files)} icons in {a.folder}:\n")
+    for f in files:
+        img = Image.open(os.path.join(a.folder, f))
+        size = img.size
+        notes = audit(normalise(img))
+        if size != (16, 16):
+            notes.append(f"stored at {size[0]}x{size[1]} -- Yoto will downscale it for you, "
+                         f"badly if it is not a multiple of 16")
+        print(f"  {f:<40} {'ok' if not notes else 'CHECK'}")
+        for n in notes:
+            print(f"      {n}")
+        bad += bool(notes)
+    print(f"\n{len(files)-bad} clean, {bad} to look at.")
+    sys.exit(1 if bad else 0)
+
+
+def main():
+    ap = argparse.ArgumentParser(description="Find and vet Yoto track icons.")
+    sub = ap.add_subparsers(dest="cmd", required=True)
+
+    s = sub.add_parser("search", help="search yotoicons.com by tag")
+    s.add_argument("tag")
+    s.add_argument("--limit", type=int, default=25)
+    s.add_argument("--exclude", nargs="*", help=f"default: {' '.join(DEFAULT_EXCLUDE)}")
+    s.set_defaults(func=cmd_search)
+
+    g = sub.add_parser("get", help="download one icon by id, normalised to 16x16")
+    g.add_argument("icon_id")
+    g.add_argument("-o", "--output")
+    g.add_argument("--preview", action="store_true", help="also write an 8x preview")
+    g.set_defaults(func=cmd_get)
+
+    c = sub.add_parser("check", help="audit a folder of icons before uploading")
+    c.add_argument("folder")
+    c.set_defaults(func=cmd_check)
+
+    a = ap.parse_args()
+    a.func(a)
+
+
+if __name__ == "__main__":
+    main()

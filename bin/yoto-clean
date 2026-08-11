@@ -1,0 +1,158 @@
+#!/usr/bin/env python3
+"""Clean up dull, hissy spoken-word audio for playback on a small mono speaker.
+
+The chain, and why each stage is there:
+
+  highpass 70 Hz      Cheap insurance against rumble. Deliberately gentle -- on
+                      most speech sources the sub-90 Hz content is already ~30 dB
+                      below the voice, so a steep filter buys nothing audible.
+  afftdn              The actual work. Tape and low-bitrate sources lose their
+                      signal-to-noise at the top: typically ~50 dB SNR at 300 Hz-1 kHz
+                      but under 20 dB at 8-15 kHz. That is what you hear as hiss.
+  -1.5 dB @ 250 Hz    Takes the boxiness out without thinning the voice.
+  +3 dB @ 2.8 kHz     Presence. Small speakers have no bass to speak of, so
+                      intelligibility lives in this band.
+  loudnorm (2-pass)   Measured first, then applied with linear=true so the gain
+                      is constant. Dynamic mode rides the gain and lifts the
+                      noise floor in the gaps.
+
+There is deliberately NO compressor. It is the obvious thing to reach for and it
+measurably backfires: on a source with a narrow loudness range it pulls the noise
+floor up between lines, which cost 4-7 dB of SNR across 60 Hz-1 kHz in testing --
+leaving those bands worse than untreated. Check with `yoto-analyse --compare`
+before adding one back.
+
+Usage:
+    yoto-clean FILE [FILE ...]              # writes alongside, "NAME [clean].m4a"
+    yoto-clean -o OUTDIR FILE ...
+    yoto-clean --nr 16 FILE                 # gentler denoise
+    yoto-clean --dry-run FILE               # print the ffmpeg chain and stop
+
+Denoise strength is the one knob worth touching. nr=24 is assertive; if the
+result sounds watery or swirly in the gaps, drop to 16 or 12. Spectral
+subtraction artefacts do not show up in any of the measurements -- only listening
+catches them, and quiet passages between lines are where to listen.
+"""
+
+import argparse
+import json
+import os
+import re
+import subprocess
+import sys
+
+DEFAULT_NR = 24
+DEFAULT_NF = -38
+DEFAULT_LUFS = -16.0   # a little hotter than broadcast -23; suits a small speaker
+DEFAULT_TP = -1.5
+DEFAULT_BITRATE = "128k"
+
+
+def static_chain(nr, nf, presence, hpf):
+    return (
+        f"highpass=f={hpf}:poles=2,"
+        f"afftdn=nr={nr}:nf={nf}:tn=1,"
+        f"equalizer=f=250:width_type=o:w=1:g=-1.5,"
+        f"equalizer=f=2800:width_type=o:w=1.2:g={presence}"
+    )
+
+
+def measure(path, chain, lufs, tp):
+    """loudnorm pass 1. Returns the measured values pass 2 needs."""
+    cmd = ["ffmpeg", "-hide_banner", "-i", path, "-af",
+           f"{chain},loudnorm=I={lufs}:TP={tp}:LRA=9:print_format=json",
+           "-f", "null", "-"]
+    out = subprocess.run(cmd, capture_output=True, text=True).stderr
+    m = re.search(r"\{[^{}]*input_i[^{}]*\}", out, re.S)
+    if not m:
+        sys.exit(f"loudnorm measurement failed on {path}\n{out[-800:]}")
+    return json.loads(m.group(0))
+
+
+def clean(path, outdir, nr, nf, presence, hpf, lufs, tp, bitrate, dry):
+    base, _ = os.path.splitext(os.path.basename(path))
+    dest_dir = outdir or os.path.dirname(os.path.abspath(path))
+    out = os.path.join(dest_dir, f"{base} [clean].m4a")
+    if os.path.abspath(out) == os.path.abspath(path):
+        sys.exit(f"refusing to overwrite the source: {path}")
+
+    chain = static_chain(nr, nf, presence, hpf)
+
+    if dry:
+        print(f"{path}\n  {chain},loudnorm=I={lufs}:TP={tp}:LRA=9  (2-pass)\n  -> {out}")
+        return None
+
+    print(f"  measuring {base} ...", flush=True)
+    m = measure(path, chain, lufs, tp)
+    norm = (f"loudnorm=I={lufs}:TP={tp}:LRA=9:"
+            f"measured_I={m['input_i']}:measured_TP={m['input_tp']}:"
+            f"measured_LRA={m['input_lra']}:measured_thresh={m['input_thresh']}:"
+            f"offset={m['target_offset']}:linear=true")
+
+    os.makedirs(dest_dir, exist_ok=True)
+    print(f"  rendering ...", flush=True)
+    r = subprocess.run(
+        ["ffmpeg", "-y", "-hide_banner", "-v", "error", "-i", path,
+         "-af", f"{chain},{norm}", "-map_metadata", "0",
+         "-c:a", "aac", "-b:a", bitrate, out],
+        capture_output=True, text=True)
+    if r.returncode != 0:
+        sys.exit(f"render failed on {path}\n{r.stderr[-800:]}")
+    return out
+
+
+def verify(path):
+    """Confirm the output actually hit the loudness target. Cheap, so always do it."""
+    out = subprocess.run(
+        ["ffmpeg", "-hide_banner", "-i", path, "-af", "ebur128=peak=true",
+         "-f", "null", "-"], capture_output=True, text=True).stderr
+    # ebur128 prints a running "I: ... LUFS" for every frame before the final
+    # Summary block, and the first frames read -70 LUFS. Take the last match.
+    i = re.findall(r"I:\s+(-?[\d.]+) LUFS", out)
+    p = re.findall(r"Peak:\s+(-?[\d.]+) dBFS", out)
+    return (float(i[-1]) if i else None, float(p[-1]) if p else None)
+
+
+def main():
+    ap = argparse.ArgumentParser(description="Clean spoken-word audio for Yoto playback.")
+    ap.add_argument("files", nargs="+")
+    ap.add_argument("-o", "--outdir", help="write here instead of alongside the source")
+    ap.add_argument("--nr", type=int, default=DEFAULT_NR,
+                    help=f"denoise strength, dB (default {DEFAULT_NR}; lower if it sounds watery)")
+    ap.add_argument("--nf", type=int, default=DEFAULT_NF, help=f"noise floor, dB (default {DEFAULT_NF})")
+    ap.add_argument("--presence", type=float, default=3.0, help="dB boost at 2.8 kHz (default 3)")
+    ap.add_argument("--hpf", type=int, default=70, help="high-pass corner, Hz (default 70)")
+    ap.add_argument("--lufs", type=float, default=DEFAULT_LUFS)
+    ap.add_argument("--tp", type=float, default=DEFAULT_TP, help="true-peak ceiling, dBTP")
+    ap.add_argument("--bitrate", default=DEFAULT_BITRATE,
+                    help=f"AAC bitrate (default {DEFAULT_BITRATE}); keep above the source")
+    ap.add_argument("--dry-run", action="store_true")
+    a = ap.parse_args()
+
+    results = []
+    for f in a.files:
+        if not os.path.exists(f):
+            sys.exit(f"no such file: {f}")
+        print(os.path.basename(f))
+        out = clean(f, a.outdir, a.nr, a.nf, a.presence, a.hpf,
+                    a.lufs, a.tp, a.bitrate, a.dry_run)
+        if out:
+            i, p = verify(out)
+            # Tolerance is loose on the peak because the AAC encode happens after
+            # loudnorm's true-peak limiter, and lossy coding adds intersample
+            # overshoot of a few tenths of a dB that loudnorm never saw.
+            ok = (i is not None and abs(i - a.lufs) < 1.0
+                  and p is not None and p <= a.tp + 1.0)
+            print(f"  {'ok ' if ok else 'CHECK'} {i} LUFS, peak {p} dBTP -> {os.path.basename(out)}")
+            results.append((out, ok))
+
+    if results and not all(ok for _, ok in results):
+        print("\nSome files missed the loudness target -- inspect before uploading.")
+        sys.exit(1)
+    if results:
+        print(f"\n{len(results)} file(s) done. Now listen to a quiet passage between "
+              f"lines: spectral denoise artefacts are inaudible to every measurement here.")
+
+
+if __name__ == "__main__":
+    main()

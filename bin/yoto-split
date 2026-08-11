@@ -1,0 +1,179 @@
+#!/usr/bin/env python3
+"""Split one long recording into numbered tracks at its real gaps.
+
+Silence detection alone will not get this right, and the failure is not random:
+the longest gap in a file is quite often a dramatic pause inside a track, while a
+genuine track break can be under two seconds. So this tool does not pretend to
+decide for you. It ranks the candidates, shows you the distribution, and cuts
+where you confirm.
+
+    yoto-split SRC --list                 # rank the gaps, cut nothing
+    yoto-split SRC --tracks 12            # cut at the 11 longest gaps
+    yoto-split SRC --at 61.5,180.2,301.8  # cut at times you chose
+    yoto-split SRC --tracks 12 --album "Title" --artist "Reader"
+
+Threshold matters more than it looks. On a source with a high noise floor -- a
+vinyl or tape transfer -- surface noise sits above -40 dB and `-40dB` will find
+almost nothing; -30 dB finds the gaps. Neither number is right in general, which
+is what --list is for: look at where the durations cluster. Real breaks tend to
+group at 2-7 s, intra-track pauses at 0.5-2 s.
+
+Cuts land at the midpoint of each silence and stream-copy, so there is no
+re-encode and no generation loss. Every cut is then verified by measuring the
+first and last 0.6 s of each track -- anything louder than -40 dB means the cut
+landed mid-word.
+"""
+
+import argparse
+import os
+import re
+import shutil
+import subprocess
+import sys
+
+
+def probe_duration(path):
+    r = subprocess.run(["ffprobe", "-v", "error", "-show_entries", "format=duration",
+                        "-of", "csv=p=0", path], capture_output=True, text=True)
+    if r.returncode != 0 or not r.stdout.strip():
+        sys.exit(f"cannot probe {path}")
+    return float(r.stdout.strip())
+
+
+def find_gaps(path, threshold_db, min_dur):
+    out = subprocess.run(
+        ["ffmpeg", "-hide_banner", "-i", path, "-af",
+         f"silencedetect=noise={threshold_db}dB:d={min_dur}", "-f", "null", "-"],
+        capture_output=True, text=True).stderr
+    starts = [float(m) for m in re.findall(r"silence_start:\s*([\d.]+)", out)]
+    ends = [float(m) for m in re.findall(r"silence_end:\s*([\d.]+)", out)]
+    gaps = []
+    for s, e in zip(starts, ends):
+        gaps.append({"start": s, "end": e, "dur": e - s, "mid": (s + e) / 2})
+    return gaps
+
+
+def fmt_time(t):
+    return f"{int(t)//60:d}:{t%60:05.2f}"
+
+
+def list_gaps(gaps, want=None):
+    if not gaps:
+        print("No gaps found. Try a higher (less negative) threshold, e.g. --threshold -30.")
+        return
+    ranked = sorted(gaps, key=lambda g: -g["dur"])
+    print(f"{len(gaps)} gaps found. Ranked by duration:\n")
+    print(f"  {'#':>3} {'at':>10} {'length':>8}")
+    for i, g in enumerate(ranked[:40], 1):
+        mark = ""
+        if want and i == want - 1:
+            mark = "   <- cut here for --tracks %d, everything below is excluded" % want
+        print(f"  {i:>3} {fmt_time(g['mid']):>10} {g['dur']:>7.2f}s{mark}")
+    if len(ranked) > 40:
+        print(f"  ... {len(ranked)-40} more")
+    print("\nLook for where the durations fall off a cliff. If they taper smoothly,")
+    print("the threshold is probably wrong -- try --threshold -30 or -25.")
+
+
+def cut(src, points, outdir, album, artist, year, titles):
+    dur = probe_duration(src)
+    bounds = [0.0] + sorted(points) + [dur]
+    total = len(bounds) - 1
+    ext = os.path.splitext(src)[1] or ".m4a"
+    os.makedirs(outdir, exist_ok=True)
+    made = []
+    for n in range(total):
+        start, end = bounds[n], bounds[n + 1]
+        title = titles[n] if titles and n < len(titles) else f"Track {n+1:02d}"
+        safe = re.sub(r'[/:]', "-", title)
+        out = os.path.join(outdir, f"{n+1:02d} {safe}{ext}")
+        cmd = ["ffmpeg", "-y", "-v", "error", "-ss", f"{start:.3f}", "-to", f"{end:.3f}",
+               "-i", src, "-vn", "-c:a", "copy",
+               "-metadata", f"title={title}",
+               "-metadata", f"track={n+1}/{total}", "-metadata", "disc=1"]
+        if album:
+            cmd += ["-metadata", f"album={album}", "-metadata", f"album_artist={album}"]
+        if artist:
+            cmd += ["-metadata", f"artist={artist}"]
+        if year:
+            cmd += ["-metadata", f"date={year}"]
+        cmd.append(out)
+        r = subprocess.run(cmd, capture_output=True, text=True)
+        if r.returncode != 0:
+            sys.exit(f"cut failed at track {n+1}\n{r.stderr[-500:]}")
+        made.append(out)
+        print(f"  {n+1:02d}  {fmt_time(start)} - {fmt_time(end)}  {title}")
+    return made
+
+
+def edge_level(path, at_end=False):
+    """Mean level of the first or last 0.6 s. volumedetect prints at info level,
+    so -v error would silently produce nothing and look like a pass."""
+    cmd = ["ffmpeg", "-hide_banner"]
+    if at_end:
+        d = probe_duration(path)
+        cmd += ["-ss", f"{max(0, d-0.6):.3f}"]
+    cmd += ["-t", "0.6", "-i", path, "-af", "volumedetect", "-f", "null", "-"]
+    out = subprocess.run(cmd, capture_output=True, text=True).stderr
+    m = re.search(r"mean_volume:\s*(-?[\d.]+) dB", out)
+    return float(m.group(1)) if m else None
+
+
+def verify(files, limit=-40.0):
+    print("\nVerifying every cut landed in silence:")
+    bad = 0
+    for f in files:
+        h, t = edge_level(f), edge_level(f, at_end=True)
+        flag = ""
+        if (h is not None and h > limit) or (t is not None and t > limit):
+            flag = "   <- CUT LANDED MID-WORD"
+            bad += 1
+        print(f"  {os.path.basename(f):<44} head {h:>7} | tail {t:>7}{flag}")
+    if bad:
+        print(f"\n{bad} track(s) look clipped. Re-run with different boundaries.")
+    else:
+        print("\nAll clean.")
+    return bad == 0
+
+
+def main():
+    ap = argparse.ArgumentParser(description="Split a long recording into Yoto tracks.")
+    ap.add_argument("src")
+    ap.add_argument("--list", action="store_true", help="rank gaps and stop")
+    ap.add_argument("--tracks", type=int, help="cut at the N-1 longest gaps")
+    ap.add_argument("--at", help="explicit comma-separated cut times in seconds")
+    ap.add_argument("--threshold", type=float, default=-30.0, help="silence threshold dB (default -30)")
+    ap.add_argument("--min-gap", type=float, default=0.5, help="minimum silence length, s (default 0.5)")
+    ap.add_argument("-o", "--outdir", default="tracks")
+    ap.add_argument("--album"), ap.add_argument("--artist"), ap.add_argument("--year")
+    ap.add_argument("--titles", help="comma-separated track titles, in order")
+    a = ap.parse_args()
+
+    if not shutil.which("ffmpeg"):
+        sys.exit("ffmpeg not found")
+    if not os.path.exists(a.src):
+        sys.exit(f"no such file: {a.src}")
+
+    if a.at:
+        points = [float(x) for x in a.at.split(",")]
+    else:
+        gaps = find_gaps(a.src, a.threshold, a.min_gap)
+        if a.list or not a.tracks:
+            list_gaps(gaps, a.tracks)
+            if not a.tracks:
+                print("\nThen re-run with --tracks N, or --at t1,t2,... to place cuts yourself.")
+            return
+        if len(gaps) < a.tracks - 1:
+            sys.exit(f"only {len(gaps)} gaps found but {a.tracks-1} cuts needed. "
+                     f"Raise --threshold or lower --min-gap.")
+        points = [g["mid"] for g in sorted(gaps, key=lambda g: -g["dur"])[:a.tracks - 1]]
+
+    titles = [t.strip() for t in a.titles.split(",")] if a.titles else None
+    print(f"Cutting {os.path.basename(a.src)} into {len(points)+1} tracks:")
+    files = cut(a.src, points, a.outdir, a.album, a.artist, a.year, titles)
+    ok = verify(files)
+    sys.exit(0 if ok else 1)
+
+
+if __name__ == "__main__":
+    main()

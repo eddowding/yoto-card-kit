@@ -1,0 +1,12 @@
+__pycache__/
+*.pyc
+.DS_Store
+tracks/
+final/
+icons/
+*.wav
+*.m4a
+*.mp3
+ggml-*.bin
+*_preview.png
+*_in-player.png

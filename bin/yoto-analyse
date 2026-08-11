@@ -1,0 +1,189 @@
+#!/usr/bin/env python3
+"""Measure what is actually wrong with a piece of speech audio.
+
+Splits the file into quiet frames and loud frames by energy percentile, takes an
+averaged FFT of each population, and reports signal-to-noise per octave-ish band.
+That is the number that tells you whether you have a hiss problem, a rumble
+problem, or a tonal hum problem -- and they need different fixes.
+
+Why FFT and not `ffmpeg -af highpass=...,volumedetect`: a 2-pole Butterworth has
+skirts wide enough that the 150-300 Hz band of a voice leaks several dB into a
+"below 80 Hz" measurement. That leak reads as rumble that is not there, and it
+will send you off high-pass filtering a problem you do not have.
+
+Usage:
+    yoto-analyse FILE [FILE ...]
+    yoto-analyse --compare ORIGINAL PROCESSED
+
+SNR is level-invariant, so --compare is a fair test of a processing chain even
+when the chain changed the overall gain.
+"""
+
+import subprocess
+import sys
+import tempfile
+import os
+
+try:
+    import numpy as np
+except ImportError:
+    sys.exit("needs numpy:  pip3 install numpy")
+
+BANDS = [20, 60, 90, 150, 300, 1000, 2000, 4000, 8000, 15000, 22050]
+HUM_FUNDAMENTALS = (50, 60)
+
+
+def decode(path):
+    """Decode anything ffmpeg can read to mono float64 at its native rate."""
+    probe = subprocess.run(
+        ["ffprobe", "-v", "error", "-select_streams", "a:0",
+         "-show_entries", "stream=sample_rate", "-of", "csv=p=0", path],
+        capture_output=True, text=True)
+    if probe.returncode != 0 or not probe.stdout.strip():
+        sys.exit(f"cannot read audio stream from {path}")
+    sr = int(probe.stdout.strip())
+
+    with tempfile.NamedTemporaryFile(suffix=".raw", delete=False) as tmp:
+        raw = tmp.name
+    try:
+        subprocess.run(
+            ["ffmpeg", "-v", "error", "-y", "-i", path,
+             "-ac", "1", "-f", "f32le", "-acodec", "pcm_f32le", raw],
+            check=True)
+        x = np.fromfile(raw, dtype=np.float32).astype(np.float64)
+    finally:
+        os.unlink(raw)
+    return sr, x
+
+
+def populations(x, frame=2048, quiet_pct=10, loud_pct=85):
+    """Split into the quietest and loudest frames -- noise-only vs signal."""
+    n = (len(x) // frame) * frame
+    frames = x[:n].reshape(-1, frame)
+    rms = np.sqrt((frames ** 2).mean(axis=1))
+    db = 20 * np.log10(rms + 1e-12)
+    q, l = np.percentile(db, quiet_pct), np.percentile(db, loud_pct)
+    return frames[db < q].ravel(), frames[db > l].ravel(), q, l
+
+
+def avg_spectrum(seg, sr, n=4096):
+    if len(seg) < n:
+        return None, None
+    w = np.hanning(n)
+    idx = range(0, len(seg) - n, n // 2)
+    acc = np.zeros(n // 2 + 1)
+    count = 0
+    for i in idx:
+        acc += np.abs(np.fft.rfft(seg[i:i + n] * w)) ** 2
+        count += 1
+    return acc / max(count, 1), np.fft.rfftfreq(n, 1 / sr)
+
+
+def band_energies(power, freqs):
+    out = []
+    for lo, hi in zip(BANDS[:-1], BANDS[1:]):
+        m = (freqs >= lo) & (freqs < hi)
+        out.append(10 * np.log10(power[m].sum() + 1e-20) if m.any() else float("nan"))
+    return out
+
+
+def hum_report(quiet, sr, n=32768):
+    """A real mains hum is a narrow spike well above its neighbours.
+
+    Anything under about +6 dB over the surrounding bins is the broadband LF
+    slope, not a tone, and notching it out will do nothing you can hear.
+    """
+    if len(quiet) < n:
+        return []
+    w = np.hanning(n)
+    acc = np.zeros(n // 2 + 1)
+    count = 0
+    for i in range(0, len(quiet) - n, n):
+        acc += np.abs(np.fft.rfft(quiet[i:i + n] * w)) ** 2
+        count += 1
+    if not count:
+        return []
+    p, f = acc / count, np.fft.rfftfreq(n, 1 / sr)
+    rows = []
+    for base in HUM_FUNDAMENTALS:
+        for h in (1, 2, 3):
+            hz = base * h
+            peak = (f > hz - 2) & (f < hz + 2)
+            near = ((f > hz - 12) & (f < hz - 4)) | ((f > hz + 4) & (f < hz + 12))
+            if peak.any() and near.any():
+                excess = 10 * np.log10(p[peak].max() / (p[near].mean() + 1e-20))
+                rows.append((hz, excess))
+    return rows
+
+
+def analyse(path):
+    sr, x = decode(path)
+    quiet, loud, qthr, lthr = populations(x)
+    pq, f = avg_spectrum(quiet, sr)
+    pl, _ = avg_spectrum(loud, sr)
+    if pq is None or pl is None:
+        sys.exit(f"{path}: too short to analyse")
+    return {
+        "path": path, "sr": sr, "dur": len(x) / sr,
+        "quiet_s": len(quiet) / sr, "loud_s": len(loud) / sr,
+        "quiet": band_energies(pq, f), "speech": band_energies(pl, f),
+        "snr": [s - q for q, s in zip(band_energies(pq, f), band_energies(pl, f))],
+        "hum": hum_report(quiet, sr),
+    }
+
+
+def label(lo, hi):
+    fmt = lambda v: f"{v/1000:g}k" if v >= 1000 else str(v)
+    return f"{fmt(lo)}-{fmt(hi)}"
+
+
+def print_one(r):
+    print(f"\n{os.path.basename(r['path'])}  "
+          f"{r['dur']:.0f}s @ {r['sr']} Hz  "
+          f"(noise sample {r['quiet_s']:.0f}s, signal sample {r['loud_s']:.0f}s)")
+    print(f"  {'band (Hz)':<12} {'noise':>8} {'signal':>8} {'SNR':>8}")
+    for (lo, hi), q, s, n in zip(zip(BANDS[:-1], BANDS[1:]),
+                                 r["quiet"], r["speech"], r["snr"]):
+        flag = ""
+        if n < 20:
+            flag = "  <- noisy"
+        elif n < 30:
+            flag = "  <- marginal"
+        print(f"  {label(lo,hi):<12} {q:8.1f} {s:8.1f} {n:8.1f}{flag}")
+    tonal = [(hz, e) for hz, e in r["hum"] if e > 6]
+    if tonal:
+        print("  tonal hum:", ", ".join(f"{hz} Hz {e:+.1f} dB" for hz, e in tonal))
+    else:
+        print("  tonal hum: none above +6 dB (any LF energy is broadband, not a tone)")
+
+
+def print_compare(a, b):
+    print(f"\n{os.path.basename(a['path'])}  ->  {os.path.basename(b['path'])}")
+    print("  SNR change per band (positive = cleaner). Level-invariant, so a")
+    print("  loudness change between the two files does not distort this.\n")
+    print(f"  {'band (Hz)':<12} {'before':>8} {'after':>8} {'delta':>8} {'signal lost':>13}")
+    for (lo, hi), sa, sb, la, lb in zip(zip(BANDS[:-1], BANDS[1:]),
+                                        a["snr"], b["snr"], a["speech"], b["speech"]):
+        # Signal loss is measured relative to the file's own broadband change,
+        # so it shows tone shaping rather than the overall gain applied.
+        print(f"  {label(lo,hi):<12} {sa:8.1f} {sb:8.1f} {sb-sa:+8.1f} {lb-la:+12.1f}")
+    print("\n  A good denoise raises SNR by several dB while 'signal lost' stays")
+    print("  near the overall gain change. If signal drops in the same bands")
+    print("  where SNR rose, the filter is eating voice, not noise.")
+
+
+def main():
+    args = sys.argv[1:]
+    if not args:
+        sys.exit(__doc__)
+    if args[0] == "--compare":
+        if len(args) != 3:
+            sys.exit("usage: yoto-analyse --compare ORIGINAL PROCESSED")
+        print_compare(analyse(args[1]), analyse(args[2]))
+    else:
+        for p in args:
+            print_one(analyse(p))
+
+
+if __name__ == "__main__":
+    main()

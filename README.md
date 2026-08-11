@@ -1,72 +1,99 @@
 # yoto-card-kit
 
-Two scripts for building [Yoto](https://yotoplay.com) Make Your Own cards.
+Turn an album, audiobook or long recording into a [Yoto](https://yotoplay.com)
+Make Your Own card.
 
-Only two, deliberately.
+Feed it one long file — a vinyl rip off YouTube, an audiobook, a radio
+recording — and you end up with numbered track files, a 16×16 icon for every
+track, and printable card art. Roughly an evening's work for a card your kid
+can play a hundred times.
 
-Nearly every step of building one of these cards — ranking silences to find the
-track boundaries, cutting and verifying the cuts, searching and vetting icons —
-is a dozen lines of ffmpeg or Pillow that regenerates cleanly from a written
-description of what it should do and what goes wrong. That got tested by
-accident: a throwaway rebuild of the icon tool, written from notes alone by
-someone who did not know the original existed, came out almost line for line
-identical, down to the same four vetting thresholds. Scripts like that are not
-worth keeping. Write one, use it, delete it.
+It's a Claude Code skill plus two scripts. The skill is the instructions:
+where to cut, what the specs are, and the dozen things that go wrong. The
+scripts do the two jobs that are fiddly to write from scratch.
 
-The method those notes contain is summarised below, per script. These two are
-here because they are the parts that *don't* regenerate:
+## Requirements
 
-### `bin/transcribe.sh`
-
-```bash
-transcribe.sh source.m4a outdir/ [chunk_seconds]
-```
-
-Transcribes a long recording in fixed chunks and emits absolute-timestamped
-lines, so you can look up what is being said at any candidate cut point.
-
-Chunking is the whole point. whisper base.en falls into a repetition loop on
-music and long runs — on one album side it emitted the same line for nine
-straight minutes and silently poisoned everything after it. Chunks bound the
-damage, and the per-chunk JSON offsets are shifted back to absolute time so the
-output still reads as one transcript.
-
-Needs `whisper-cpp` and the base.en model:
+- macOS or Linux
+- `ffmpeg` and Python 3 with Pillow
+- `yt-dlp` if your source is on YouTube
+- `whisper-cpp` if you want the transcript check (recommended for spoken word)
+- [Claude Code](https://claude.com/claude-code) if you want it to drive
 
 ```bash
-brew install whisper-cpp
+brew install ffmpeg yt-dlp whisper-cpp
+pip3 install pillow
+
+# whisper model, ~148MB, one time
 mkdir -p ~/.local/share/whisper
 curl -sL -o ~/.local/share/whisper/ggml-base.en.bin \
   https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-base.en.bin
 ```
 
-Override the location with `WHISPER_MODEL` if you keep it elsewhere.
+## Install
+
+```bash
+git clone https://github.com/eddowding/yoto-card-kit.git
+cd yoto-card-kit
+
+# make the skill available to Claude Code
+mkdir -p ~/.claude/skills
+cp -r skills/yoto ~/.claude/skills/
+```
+
+Then in Claude Code:
+
+```
+/yoto https://www.youtube.com/watch?v=...
+```
+
+It downloads the source, finds the track boundaries, cuts them, sources or
+draws an icon per track, and builds the card art. You upload the result at
+[my.yotoplay.com](https://my.yotoplay.com) — that last step is manual clicking,
+there's no way round it.
+
+Or read [`skills/yoto/SKILL.md`](skills/yoto/SKILL.md) and do it by hand. It's
+written to be followed by a person as well as a machine.
+
+## The two scripts
+
+Both are standalone — no Claude needed.
+
+### `bin/transcribe.sh`
+
+```bash
+bin/transcribe.sh source.m4a outdir/ [chunk_seconds]
+```
+
+Transcribes a long recording and writes `outdir/transcript.txt` as
+`<absolute seconds>\t<text>`, so you can look up what's being said at any
+candidate cut point and check it isn't mid-sentence.
+
+It works in fixed chunks (10 minutes by default) because whisper falls into
+repetition loops on music and long runs — one loop can silently poison
+everything after it. Chunking keeps the damage to one chunk, and the timestamps
+are stitched back to absolute time so it still reads as one transcript.
+
+Set `WHISPER_MODEL` if your model lives somewhere other than
+`~/.local/share/whisper/ggml-base.en.bin`.
 
 ### `bin/cardart.py`
 
 ```bash
-cardart.py <icons-dir> <out.png> "<Title>" "<Subtitle>" <theme>
+bin/cardart.py <icons-dir> <out.png> "<Title>" "<Subtitle>" <theme>
 ```
 
-Builds a 748×1248 sticker from a folder of 16×16 track icons.
+Builds a 748×1248 sticker from a folder of 16×16 track icons: a title band and
+a grid of the icons, which tells you what's on the card at a glance.
 
-The design constraint is not in Yoto's documentation: **only about the top 21%
-of the card is visible once it is in the player** (~262 px of 1248), so the title
-band lives up there and nothing below it is load-bearing. Icons sit on dark
-rounded tiles because they are drawn for the player's dark screen — pale
-subjects vanish on a cream card.
+The thing that isn't in Yoto's docs: **only about the top 21% of the card is
+visible once it's in the player**, so the title goes up there and everything
+below it is decoration. Icons sit on dark rounded tiles because they're drawn
+for the player's dark screen — pale subjects vanish on a cream card.
 
-The layout work is the part worth keeping: titles wrap to two lines at the
-largest size that fits, tile size is computed from the space available, and the
-grid widens to four columns past nine icons. A rebuild from the prose
-description got all of that wrong.
-
-Themes are in the file — `pooh`, `donaldson`. Add one per card project.
-
-## Requirements
-
-ffmpeg, Python 3 with Pillow, and whisper-cpp for the transcriber.
+Two themes ship in the file (`pooh`, `donaldson`). Add your own to the `THEMES`
+dict at the top; it's six colours.
 
 ## Licence
 
-MIT.
+MIT. Not affiliated with Yoto.

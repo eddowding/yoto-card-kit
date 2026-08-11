@@ -2,17 +2,19 @@
 
 Two scripts for building [Yoto](https://yotoplay.com) Make Your Own cards.
 
-**The method lives in the skill, not here:**
-`~/Sites/Odin/Operations/Claude/skills/operations/yoto/SKILL.md`.
+Only two, deliberately.
 
-That is deliberate. Nearly every step of this pipeline — silence-ranked
-trimming, cut verification, icon search and vetting — is a dozen lines of ffmpeg
-or Pillow that regenerates cleanly from a written description. It was tested: a
-throwaway rebuild of the icon tool from the skill alone reproduced the original
-almost line for line, down to the same four vetting thresholds. Keeping those
-scripts around buys nothing and costs a second copy to maintain.
+Nearly every step of building one of these cards — ranking silences to find the
+track boundaries, cutting and verifying the cuts, searching and vetting icons —
+is a dozen lines of ffmpeg or Pillow that regenerates cleanly from a written
+description of what it should do and what goes wrong. That got tested by
+accident: a throwaway rebuild of the icon tool, written from notes alone by
+someone who did not know the original existed, came out almost line for line
+identical, down to the same four vetting thresholds. Scripts like that are not
+worth keeping. Write one, use it, delete it.
 
-These two are here because they do not regenerate:
+The method those notes contain is summarised below, per script. These two are
+here because they are the parts that *don't* regenerate:
 
 ### `bin/transcribe.sh`
 

@@ -39,6 +39,9 @@ cd yoto-card-kit
 # make the skill available to Claude Code
 mkdir -p ~/.claude/skills
 cp -r skills/yoto ~/.claude/skills/
+
+# put the scripts on your PATH (add to ~/.zshrc to keep it)
+export PATH="$PWD/bin:$PATH"
 ```
 
 Then in Claude Code:
@@ -62,7 +65,7 @@ Both are standalone — no Claude needed.
 ### `bin/transcribe.sh`
 
 ```bash
-bin/transcribe.sh source.m4a outdir/ [chunk_seconds]
+transcribe.sh source.m4a outdir/ [chunk_seconds]
 ```
 
 Transcribes a long recording and writes `outdir/transcript.txt` as
@@ -80,7 +83,7 @@ Set `WHISPER_MODEL` if your model lives somewhere other than
 ### `bin/cardart.py`
 
 ```bash
-bin/cardart.py <icons-dir> <out.png> "<Title>" "<Subtitle>" <theme>
+cardart.py <icons-dir> <out.png> "<Title>" "<Subtitle>" <theme>
 ```
 
 Builds a 748×1248 sticker from a folder of 16×16 track icons: a title band and

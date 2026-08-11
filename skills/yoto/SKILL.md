@@ -15,10 +15,10 @@ needs: numbered track files, a 16×16 icon per track, and card art.
 /yoto art <folder>           # card art only
 ```
 
-Two helper scripts live in `bin/` of this repo — `transcribe.sh` (step 2) and
-`cardart.py` (step 5). Everything else is a few lines of ffmpeg or Pillow
-written on the spot; there's nothing to install beyond the requirements in the
-README.
+Two helper scripts do the fiddly parts: `transcribe.sh` (step 2) and
+`cardart.py` (step 5). They live in `bin/` of the yoto-card-kit repo — put that
+on your `PATH` and call them by name, as below. Everything else is a few lines
+of ffmpeg or Pillow written on the spot.
 
 **Trim only — don't clean up the audio.** No denoise, no EQ, no loudness
 normalisation. The source is the source.
@@ -64,7 +64,7 @@ appeared that was just a pause in a spoken-word piece. So verify by content.
 ## 2. Verify the boundaries against a transcript
 
 ```bash
-bin/transcribe.sh SRC out/ 600     # 10-minute chunks
+transcribe.sh SRC out/ 600     # 10-minute chunks
 # -> out/transcript.txt, lines of "<absolute seconds>\t<text>"
 ```
 
@@ -232,7 +232,7 @@ screen, and pale subjects (white birds, white mice) vanish on a cream card.
 Tiles fix the contrast and echo the player's display.
 
 ```bash
-bin/cardart.py <icons-dir> <out.png> "<Title>" "<Subtitle>" <theme>
+cardart.py <icons-dir> <out.png> "<Title>" "<Subtitle>" <theme>
 ```
 
 Themes are a dict at the top of the file — add one per card project rather than

@@ -4,6 +4,10 @@
 # and a loop silently poisons everything after it.
 #   transcribe.sh <norm.m4a> <outdir> [chunk_seconds]
 set -eu
+if [ $# -lt 2 ] || [ "$1" = "-h" ] || [ "$1" = "--help" ]; then
+  echo "usage: transcribe.sh <source-audio> <outdir> [chunk_seconds]" >&2
+  exit 1
+fi
 SRC="$1"; OUT="$2"; CHUNK="${3:-600}"
 
 # Model lives somewhere permanent. Override with WHISPER_MODEL if you keep it

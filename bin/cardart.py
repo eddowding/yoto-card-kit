@@ -67,7 +67,13 @@ def rounded_tile(size, radius, colour):
 
 
 def main():
+    if len(sys.argv) != 6 or sys.argv[1] in ("-h", "--help"):
+        sys.exit(f'usage: cardart.py <icons-dir> <out.png> "<Title>" "<Subtitle>" <theme>\n'
+                 f'themes: {", ".join(sorted(THEMES))}')
     icons_dir, out, title, subtitle, theme_name = sys.argv[1:6]
+    if theme_name not in THEMES:
+        sys.exit(f'unknown theme "{theme_name}" — available: {", ".join(sorted(THEMES))}\n'
+                 f'add your own to the THEMES dict at the top of this file')
     t = THEMES[theme_name]
 
     # Only real icons — square and a multiple of 16. Icon folders tend to

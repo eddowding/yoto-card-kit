@@ -15,13 +15,44 @@ needs: numbered track files, a 16×16 icon per track, and card art.
 /yoto art <folder>           # card art only
 ```
 
-Two helper scripts do the fiddly parts: `transcribe.sh` (step 2) and
-`cardart.py` (step 5). They live in `bin/` of the yoto-card-kit repo — put that
-on your `PATH` and call them by name, as below. Everything else is a few lines
-of ffmpeg or Pillow written on the spot.
-
 **Trim only — don't clean up the audio.** No denoise, no EQ, no loudness
 normalisation. The source is the source.
+
+## Working with the user
+
+Assume a tired parent who wants a card, not a tutorial. Don't paste ffmpeg
+output at them. Tell them what you're doing in a line, ask only when you
+genuinely need a human ear or eye — confirming a tracklist, choosing between two
+icons — and say roughly how long a slow step will take.
+
+## Setup
+
+Install whatever is missing, without asking; just say what you're installing.
+
+```bash
+brew install ffmpeg yt-dlp whisper-cpp     # whichever aren't present
+python3 -c "import PIL" 2>/dev/null || pip3 install pillow
+
+# whisper model, ~148MB, one time
+[ -s ~/.local/share/whisper/ggml-base.en.bin ] || {
+  mkdir -p ~/.local/share/whisper
+  curl -sL -o ~/.local/share/whisper/ggml-base.en.bin \
+    https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-base.en.bin
+}
+```
+
+Two helper scripts sit next to this file and do the fiddly parts —
+`$SKILL/bin/transcribe.sh` (step 2) and `$SKILL/bin/cardart.py` (step 5), where
+`$SKILL` is this skill's own folder, normally `~/.claude/skills/yoto`. If either
+is missing, fetch it:
+
+```bash
+curl -sL -o "$SKILL/bin/cardart.py" \
+  https://raw.githubusercontent.com/eddowding/yoto-card-kit/main/skills/yoto/bin/cardart.py
+chmod +x "$SKILL/bin/cardart.py"
+```
+
+Everything else below is a few lines of ffmpeg or Pillow you write as you go.
 
 ---
 
@@ -64,7 +95,7 @@ appeared that was just a pause in a spoken-word piece. So verify by content.
 ## 2. Verify the boundaries against a transcript
 
 ```bash
-transcribe.sh SRC out/ 600     # 10-minute chunks
+"$SKILL/bin/transcribe.sh" SRC out/ 600     # 10-minute chunks
 # -> out/transcript.txt, lines of "<absolute seconds>\t<text>"
 ```
 
@@ -232,7 +263,7 @@ screen, and pale subjects (white birds, white mice) vanish on a cream card.
 Tiles fix the contrast and echo the player's display.
 
 ```bash
-cardart.py <icons-dir> <out.png> "<Title>" "<Subtitle>" <theme>
+"$SKILL/bin/cardart.py" <icons-dir> <out.png> "<Title>" "<Subtitle>" <theme>
 ```
 
 Themes are a dict at the top of the file — add one per card project rather than
